@@ -28,3 +28,10 @@ jobs:
       with:
         name: libs
         path: android/libs
+    - name: Release
+      uses: softprops/action-gh-release@v2
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: |
+          android/build/outputs/apk/release/android-release.apk
+          android/libs
