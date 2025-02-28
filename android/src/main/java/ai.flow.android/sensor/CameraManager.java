@@ -88,7 +88,8 @@ public class CameraManager implements SensorInterface {
             return availableCamerasInfo.get(OnRoadScreen.CamSelected).getCameraSelector();
         }
 
-        return new CameraSelector.Builder().requireLensFacing(CameraSelector.LENS_FACING_BACK).build();
+        // return new CameraSelector.Builder().requireLensFacing(CameraSelector.LENS_FACING_BACK).build();
+        return new CameraSelector.Builder().requireLensFacing(CameraSelector.LENS_FACING_EXTERNAL).build();
     }
 
     public CameraManager(Context context, int cameraType){
