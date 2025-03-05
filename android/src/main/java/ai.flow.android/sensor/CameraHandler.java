@@ -58,6 +58,12 @@ import ai.flow.sensor.SensorInterface;
 import ai.flow.sensor.messages.MsgFrameBuffer;
 import messaging.ZMQPubHandler;
 
+import com.jiangdg.usbcamera.UVCCameraHelper;
+import com.jiangdg.usbcamera.utils.FileUtils;
+import com.serenegiant.usb.CameraDialog;
+import com.serenegiant.usb.USBMonitor;
+import com.serenegiant.usb.common.AbstractUVCCameraHandler;
+
 
 public class CameraHandler implements SensorInterface {
 
@@ -79,8 +85,14 @@ public class CameraHandler implements SensorInterface {
     public ZMQPubHandler ph;
     public int frameID = 0;
 
+    private UVCCameraHelper mCameraHelper;
+    private boolean isUVCCamera = false;
+    private CameraViewInterface mUVCCameraView;
+
     public CameraHandler(Context context) {
         this.context = context;
+        // 初始化 UVC 摄像头
+        initUVCCamera();
         backgroundThread = new HandlerThread("CameraBackground");
         backgroundThread.start();
         backgroundHandler = new Handler(backgroundThread.getLooper());
@@ -98,44 +110,122 @@ public class CameraHandler implements SensorInterface {
         ph.createPublishers(Arrays.asList("wideRoadCameraState", "wideRoadCameraBuffer"));
     }
 
-    @Override
-    public void dispose() {}
+    private void initUVCCamera() {
+        mCameraHelper = UVCCameraHelper.getInstance();
+        mCameraHelper.setDefaultFrameFormat(UVCCameraHelper.FRAME_FORMAT_YUYV);
+        mCameraHelper.initUSBMonitor(context, new UVCCameraHelper.OnMyDevConnectListener() {
+            @Override
+            public void onAttachDev(UsbDevice device) {
+                // 检测到设备插入
+                if (!isUVCCamera) {
+                    mCameraHelper.requestPermission(device);
+                }
+            }
 
-    public void stop(){}
+            @Override
+            public void onDettachDev(UsbDevice device) {
+                // 设备拔出
+                if (isUVCCamera) {
+                    isUVCCamera = false;
+                    // 切换回内置摄像头
+                    start();
+                }
+            }
+
+            @Override
+            public void onConnectDev(UsbDevice device, boolean isConnected) {
+                if (isConnected) {
+                    isUVCCamera = true;
+                    // 配置摄像头参数
+                    mCameraHelper.updateResolution(W, H);
+                }
+            }
+
+            @Override
+            public void onDisConnectDev(UsbDevice device) {
+                isUVCCamera = false;
+            }
+        });
+
+        // 设置预览回调
+        mCameraHelper.setPreviewCallback(new AbstractUVCCameraHandler.OnPreViewResultListener() {
+            @Override
+            public void onPreviewResult(byte[] data) {
+                if (data != null) {
+                    // 将 UVC 摄像头数据转换为 YUV 格式
+                    ByteBuffer buffer = ByteBuffer.wrap(data);
+                    // 填充到现有的 YUV buffer
+                    yuvBuffer.put(buffer);
+                    
+                    // 更新帧信息
+                    msgFrameData.frameData.setFrameId(frameID);
+                    
+                    // 执行模型
+                    ModelExecutor.instance.ExecuteModel(
+                            msgFrameData.frameData.asReader(),
+                            msgFrameBuffer.frameBuffer.asReader(),
+                            System.currentTimeMillis());
+
+                    // 发布数据
+                    ph.publishBuffer("wideRoadCameraState", msgFrameData.serialize(true));
+                    ph.publishBuffer("wideRoadCameraBuffer", msgFrameBuffer.serialize(true));
+
+                    frameID += 1;
+                }
+            }
+        });
+    }
+    @Override
+    public void dispose() {
+        if (mCameraHelper != null) {
+            mCameraHelper.release();
+        }
+    }
+
+    public void stop(){
+        if (isUVCCamera && mCameraHelper != null) {
+            mCameraHelper.stopPreview();
+        }
+    }
 
     public void start() {
-        android.hardware.camera2.CameraManager manager = (android.hardware.camera2.CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
+        if (mCameraHelper != null && mCameraHelper.getUsbDeviceCount() > 0) {
+            // 优先使用 USB 摄像头
+            mCameraHelper.startPreview();
+        } else {
+            android.hardware.camera2.CameraManager manager = (android.hardware.camera2.CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
 
-        if (manager == null) {
-            throw new RuntimeException("Unable to get camera manager.");
-        }
-
-        String cameraId = "0";
-
-        try {
-            cameraCharacteristics = manager.getCameraCharacteristics(cameraId);
-            StreamConfigurationMap map = cameraCharacteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-
-            if (ActivityCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-                return;
+            if (manager == null) {
+                throw new RuntimeException("Unable to get camera manager.");
             }
-            manager.openCamera(cameraId, new CameraDevice.StateCallback() {
-                @Override
-                public void onOpened(@NonNull CameraDevice device) {
-                    cameraDevice = device;
-                    startCamera();
-                }
 
-                @Override
-                public void onDisconnected(@NonNull CameraDevice device) {}
+            String cameraId = "0";
 
-                @Override
-                public void onError(@NonNull CameraDevice device, int error) {
-                    Log.w(TAG, "Error opening camera: " + error);
+            try {
+                cameraCharacteristics = manager.getCameraCharacteristics(cameraId);
+                StreamConfigurationMap map = cameraCharacteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+
+                if (ActivityCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                    return;
                 }
-            }, backgroundHandler);
-        } catch (CameraAccessException e) {
-            Log.w(TAG, "Error getting camera configuration.", e);
+                manager.openCamera(cameraId, new CameraDevice.StateCallback() {
+                    @Override
+                    public void onOpened(@NonNull CameraDevice device) {
+                        cameraDevice = device;
+                        startCamera();
+                    }
+
+                    @Override
+                    public void onDisconnected(@NonNull CameraDevice device) {}
+
+                    @Override
+                    public void onError(@NonNull CameraDevice device, int error) {
+                        Log.w(TAG, "Error opening camera: " + error);
+                    }
+                }, backgroundHandler);
+            } catch (CameraAccessException e) {
+                Log.w(TAG, "Error getting camera configuration.", e);
+            }
         }
     }
 
